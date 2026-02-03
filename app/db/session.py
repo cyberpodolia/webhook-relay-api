@@ -18,7 +18,12 @@ def init_db(database_url: str) -> None:
         connect_args = {"check_same_thread": False}
 
     _ENGINE = create_engine(database_url, connect_args=connect_args)
-    _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_ENGINE)
+    _SessionLocal = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=_ENGINE,
+        expire_on_commit=False,
+    )
     Base.metadata.create_all(bind=_ENGINE)
 
 
