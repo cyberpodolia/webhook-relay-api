@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Annotated, Any, Dict
 from uuid import uuid4
 
 from fastapi import APIRouter, Body, HTTPException, Request
@@ -44,7 +44,7 @@ async def ready() -> Dict[str, str]:
 async def create_event(
     source: str,
     request: Request,
-    payload: Dict[str, Any] = Body(...),
+    payload: Annotated[Dict[str, Any], Body(...)],
 ) -> Dict[str, Any]:
     settings = get_settings()
     request_id = request_id_ctx.get() or str(uuid4())
@@ -92,7 +92,11 @@ async def create_event(
 async def list_events(limit: int = 50) -> Dict[str, Any]:
     limit = min(max(limit, 1), 100)
     with get_db() as db:
-        events = db.execute(select(Event).order_by(Event.received_at.desc()).limit(limit)).scalars().all()
+        events = (
+            db.execute(select(Event).order_by(Event.received_at.desc()).limit(limit))
+            .scalars()
+            .all()
+        )
 
     return {
         "events": [
