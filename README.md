@@ -1,6 +1,5 @@
 # Webhook Relay API
 
-[![CI](https://github.com/example/repo1-webhook-relay-api/actions/workflows/ci.yml/badge.svg)](https://github.com/example/repo1-webhook-relay-api/actions/workflows/ci.yml)
 
 Small FastAPI webhook intake service with SQLAlchemy persistence, optional outbound relay (`httpx`), Prometheus metrics, and Alembic migrations.
 
