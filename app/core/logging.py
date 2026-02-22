@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import contextvars
 import json
@@ -27,7 +27,8 @@ class JsonFormatter(logging.Formatter):
         extras = {
             k: v
             for k, v in record.__dict__.items()
-            if k not in {
+            if k
+            not in {
                 "args",
                 "asctime",
                 "created",

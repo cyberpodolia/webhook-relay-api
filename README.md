@@ -1,55 +1,97 @@
-﻿# Webhook Relay API
+# Webhook Relay API
 
-[![CI](https://github.com/yourname/repo1-webhook-relay-api/actions/workflows/ci.yml/badge.svg)](https://github.com/yourname/repo1-webhook-relay-api/actions/workflows/ci.yml)
+[![CI](https://github.com/example/repo1-webhook-relay-api/actions/workflows/ci.yml/badge.svg)](https://github.com/example/repo1-webhook-relay-api/actions/workflows/ci.yml)
 
-A small FastAPI service that accepts webhooks, normalizes events, stores them, and optionally relays them to a target URL.
+Small FastAPI webhook intake service with SQLAlchemy persistence, optional outbound relay (`httpx`), Prometheus metrics, and Alembic migrations.
 
-## Run in 60 seconds
+## Features
+
+- Webhook intake with optional HMAC-SHA256 signature verification (`X-Webhook-Signature`)
+- Request body size limit and optional source allowlist
+- Idempotency by `Idempotency-Key` per source
+- Optional outbound relay with SSRF protections and retry/backoff
+- Stored relay result metadata on events
+- Cursor pagination and source filtering for event listing
+- Prometheus metrics (`/metrics`)
+- Retention cleanup via admin endpoint and CLI script
+- Alembic migrations for DB schema management
+
+## Endpoints
+
+- `GET /health`
+- `GET /ready`
+- `GET /metrics`
+- `POST /webhooks/{source}`
+- `GET /events?limit=50&cursor=...&source=...`
+- `GET /events/{event_id}`
+- `POST /admin/cleanup` (requires `X-Admin-Token`)
+
+## Environment Variables
+
+- `APP_HOST` (default `0.0.0.0`)
+- `APP_PORT` (default `8000`)
+- `DATABASE_URL` (default `sqlite:///./data/app.db`)
+- `TARGET_URL` (optional outbound relay target)
+- `LOG_LEVEL` (default `INFO`)
+- `WEBHOOK_SECRET` (optional; if set, `X-Webhook-Signature` is required)
+- `MAX_BODY_BYTES` (default `1048576`)
+- `ALLOWED_SOURCES` (optional comma-separated webhook sources)
+- `RELAY_ALLOW_HOSTS` (optional comma-separated hostnames allowed for `TARGET_URL`)
+- `EVENT_RETENTION_DAYS` (optional; enables cleanup retention cutoff)
+- `ADMIN_TOKEN` (optional; required for `/admin/cleanup` when set)
+
+## Local Development
 
 ```bash
 python -m venv .venv
-. .venv/bin/activate  # On Windows: .venv\Scripts\activate
+. .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
+alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
 ## Quickstart
 
 ```bash
-curl -X GET http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/health
+
+BODY='{"order_id":123,"status":"paid"}'
+SIG=$(python - <<'PY'
+import hashlib, hmac
+secret=b"change-me"
+body=b'{"order_id":123,"status":"paid"}'
+print(hmac.new(secret, body, hashlib.sha256).hexdigest())
+PY
+)
+
 curl -X POST http://127.0.0.1:8000/webhooks/demo \
   -H "Content-Type: application/json" \
-  -d '{"order_id": 123, "status": "paid"}'
+  -H "X-Webhook-Signature: $SIG" \
+  -H "Idempotency-Key: example-1" \
+  -d "$BODY"
 
-curl -X GET "http://127.0.0.1:8000/events?limit=10"
+curl "http://127.0.0.1:8000/events?limit=10"
 ```
 
-## What this demonstrates
+## Security Notes
 
-- FastAPI service design with structured logging and request IDs
-- Webhook normalization and storage using SQLAlchemy
-- Optional outbound relay with retries
-- Tests with pytest
-- Dockerized local run and CI checks
+- Relay only supports `http`/`https` targets.
+- Relay preflight blocks localhost/private/reserved/link-local IPs.
+- `RELAY_ALLOW_HOSTS` is recommended in production and can disable relay to unexpected hosts.
+- Disallowed sources return `404` to avoid source enumeration.
 
-## Configuration
+## Cleanup
 
-- `APP_HOST` (default `0.0.0.0`)
-- `APP_PORT` (default `8000`)
-- `DATABASE_URL` (default `sqlite:///./data/app.db`)
-- `TARGET_URL` (default empty)
-- `LOG_LEVEL` (default `INFO`)
-
-## Metrics
-
-- Prometheus metrics available at `/metrics`
-
-## Local development
+Admin endpoint:
 
 ```bash
-pip install -e ".[dev]"
-ruff check .
-pytest
+curl -X POST http://127.0.0.1:8000/admin/cleanup -H "X-Admin-Token: $ADMIN_TOKEN"
+```
+
+CLI for cron:
+
+```bash
+python -m app.scripts.cleanup
 ```
 
 ## Docker
@@ -58,11 +100,12 @@ pytest
 docker compose up --build
 ```
 
-## Endpoints
+Container startup runs `alembic upgrade head` before launching `uvicorn`.
 
-- `GET /health`
-- `GET /ready`
-- `GET /metrics`
-- `POST /webhooks/{source}`
-- `GET /events?limit=50`
-- `GET /events/{event_id}`
+## Checks
+
+```bash
+ruff check .
+ruff format --check .
+pytest
+```

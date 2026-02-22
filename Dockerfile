@@ -1,13 +1,17 @@
-﻿FROM python:3.11-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
 COPY pyproject.toml README.md /app/
 COPY app /app/app
+COPY alembic /app/alembic
+COPY alembic.ini /app/alembic.ini
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir .
+    && pip install --no-cache-dir . \
+    && chmod +x /app/docker-entrypoint.sh
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/docker-entrypoint.sh"]
