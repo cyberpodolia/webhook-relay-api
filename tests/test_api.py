@@ -1,5 +1,15 @@
-﻿import importlib
+"""API tests covering security controls, relay behavior, and pagination semantics."""
 
+from __future__ import annotations
+
+import hashlib
+import hmac
+import importlib
+import json
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+
+import httpx
 from fastapi.testclient import TestClient
 
 
@@ -204,30 +214,31 @@ def test_cleanup_deletes_old_events_with_admin_token(tmp_path, monkeypatch):
 
     old_ts = datetime.now(timezone.utc) - timedelta(days=30)
     new_ts = datetime.now(timezone.utc)
-    # Why: seed rows directly to control timestamps without sleeping or monkeypatching time.
-    with get_db() as db:
-        db.add(
-            Event(
-                id="00000000-0000-0000-0000-000000000001",
-                source="s1",
-                received_at=old_ts,
-                payload={"old": True},
-                headers={},
-                request_id="00000000-0000-0000-0000-000000000001",
-            )
-        )
-        db.add(
-            Event(
-                id="00000000-0000-0000-0000-000000000002",
-                source="s1",
-                received_at=new_ts,
-                payload={"old": False},
-                headers={},
-                request_id="00000000-0000-0000-0000-000000000002",
-            )
-        )
-
     with TestClient(main.app) as client:
+        # Why: enter TestClient first so lifespan startup initializes the DB/session factory.
+        # Then seed rows directly to control timestamps without sleeping or monkeypatching time.
+        with get_db() as db:
+            db.add(
+                Event(
+                    id="00000000-0000-0000-0000-000000000001",
+                    source="s1",
+                    received_at=old_ts,
+                    payload={"old": True},
+                    headers={},
+                    request_id="00000000-0000-0000-0000-000000000001",
+                )
+            )
+            db.add(
+                Event(
+                    id="00000000-0000-0000-0000-000000000002",
+                    source="s1",
+                    received_at=new_ts,
+                    payload={"old": False},
+                    headers={},
+                    request_id="00000000-0000-0000-0000-000000000002",
+                )
+            )
+
         unauthorized = client.post("/admin/cleanup")
         assert unauthorized.status_code == 401
 
