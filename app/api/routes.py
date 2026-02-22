@@ -10,7 +10,7 @@ import base64
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any, Dict
 from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -139,9 +139,12 @@ async def ready() -> HealthResponse:
 async def create_event(source: str, request: Request) -> CreateWebhookResponse:
     """Accept a webhook, persist it, and optionally relay to the configured target.
 
-    If `Idempotency-Key` is provided and already exists for the same source, this
-    returns the original event response instead of creating a duplicate.
-    """
+@router.post("/webhooks/{source}")
+async def create_event(
+    source: str,
+    request: Request,
+    payload: Annotated[Dict[str, Any], Body(...)],
+) -> Dict[str, Any]:
     settings = get_settings()
     if settings.allowed_sources and source not in settings.allowed_sources:
         # Security: return 404 to avoid confirming whether a source name exists.
@@ -264,7 +267,11 @@ async def list_events(
     stmt = stmt.order_by(Event.received_at.desc(), Event.id.desc()).limit(limit + 1)
 
     with get_db() as db:
-        rows = db.execute(stmt).scalars().all()
+        events = (
+            db.execute(select(Event).order_by(Event.received_at.desc()).limit(limit))
+            .scalars()
+            .all()
+        )
 
     has_more = len(rows) > limit
     items = rows[:limit]

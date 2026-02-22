@@ -26,10 +26,11 @@ def init_db(database_url: str) -> None:
     connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
     _ENGINE = create_engine(database_url, connect_args=connect_args)
     _SessionLocal = sessionmaker(
-        autocommit=False, autoflush=False, bind=_ENGINE, expire_on_commit=False
+        autocommit=False,
+        autoflush=False,
+        bind=_ENGINE,
+        expire_on_commit=False,
     )
-    # Rationale: keep local/test startup simple. Production schema evolution
-    # should still be performed through Alembic migrations.
     Base.metadata.create_all(bind=_ENGINE)
 
 
