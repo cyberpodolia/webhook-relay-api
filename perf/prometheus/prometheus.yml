@@ -1,0 +1,33 @@
+﻿global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: relay-host
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - host.docker.internal:8000
+        labels:
+          relay_mode: host
+
+  - job_name: relay-docker
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - relay:8000
+        labels:
+          relay_mode: docker
+
+  - job_name: receivers
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - receiver-fast:8080
+          - receiver-slow:8080
+          - receiver-flaky:8080
+
+  - job_name: cadvisor
+    static_configs:
+      - targets:
+          - cadvisor:8080
