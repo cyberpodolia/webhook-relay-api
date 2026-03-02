@@ -108,3 +108,18 @@ ruff check .
 ruff format --check .
 pytest
 ```
+
+## Performance Testing
+
+The production-style perf harness is in `perf/`.
+
+- Runbook: `perf/README.md`
+- Compose stack: `perf/docker-compose.perf.yml`
+- Modes: host-relay (recommended) and docker-relay (optional profile)
+
+### Perf Artifact Capture
+
+- Report template: `perf/REPORT.md`
+- Save Grafana screenshots for latency, error rate, relay RPS, CPU, and RAM, then reference them in `perf/REPORT.md`.
+- Record k6 command lines, scenario duration, and relay mode (host-relay or docker-relay) in `perf/REPORT.md`.
+- Keep report entries evidence-based; mark unknowns as `UNKNOWN` when prerequisites are missing.
