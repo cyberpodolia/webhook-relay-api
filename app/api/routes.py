@@ -14,7 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import get_settings
@@ -95,6 +95,72 @@ def _create_response(event: Event) -> CreateWebhookResponse:
     )
 
 
+def _apply_relay_result(event: Event, relay_result: dict[str, Any]) -> None:
+    """Persist normalized relay outcome fields onto an event row."""
+    values = _relay_update_values(relay_result)
+    event.relay_status = values["relay_status"]
+    event.relay_attempted = values["relay_attempted"]
+    event.relay_success = values["relay_success"]
+    event.relay_attempts = values["relay_attempts"]
+    event.relay_reason = values["relay_reason"]
+    event.relay_last_error = values["relay_last_error"]
+    event.relay_last_status_code = values["relay_last_status_code"]
+    event.relay_last_attempt_at = values["relay_last_attempt_at"]
+
+
+def _relay_update_values(relay_result: dict[str, Any]) -> dict[str, Any]:
+    """Build database update values for relay result persistence."""
+    relay_status = "success" if relay_result.get("success") else "failed"
+    if not relay_result.get("attempted"):
+        relay_status = "skipped"
+    return {
+        "relay_status": relay_status,
+        "relay_attempted": 1 if relay_result.get("attempted") else 0,
+        "relay_success": 1 if relay_result.get("success") else 0,
+        "relay_attempts": int(relay_result.get("attempts") or 0),
+        "relay_reason": relay_result.get("reason"),
+        "relay_last_error": relay_result.get("last_error"),
+        "relay_last_status_code": relay_result.get("status_code"),
+        "relay_last_attempt_at": relay_result.get("last_attempt_at"),
+    }
+
+
+async def _relay_and_persist(
+    event_id: str,
+    relay_payload: dict[str, Any],
+    target_url: str,
+    request_id: str,
+    relay_allow_hosts: set[str] | frozenset[str],
+    relay_allow_private_ips: bool,
+) -> None:
+    """Execute outbound relay in the background and persist its final outcome."""
+    relay_result = await relay.relay_event(
+        event=relay_payload,
+        target_url=target_url,
+        request_id=request_id,
+        relay_allow_hosts=relay_allow_hosts,
+        relay_allow_private_ips=relay_allow_private_ips,
+    )
+    with get_db() as db:
+        # Perf: avoid a read-before-write on the hot background persistence path.
+        db.execute(
+            update(Event).where(Event.id == event_id).values(**_relay_update_values(relay_result))
+        )
+
+
+def _queue_full_relay_result() -> dict[str, Any]:
+    """Stable relay result when the bounded background queue is saturated."""
+    return {
+        "attempted": False,
+        "success": False,
+        "reason": "relay_queue_full",
+        "status_code": None,
+        "attempts": 0,
+        "last_error": "relay queue is full",
+        "last_attempt_at": None,
+    }
+
+
 def _encode_cursor(received_at: datetime, event_id: str) -> str:
     """Encode pagination state as an opaque base64 cursor."""
     payload = {"ts": _as_utc(received_at).isoformat(), "id": event_id}
@@ -166,18 +232,8 @@ async def create_event(source: str, request: Request) -> CreateWebhookResponse:
     idempotency_key = request.headers.get("Idempotency-Key")
     safe_headers = {**_safe_headers(request), "x-request-id": request_id}
 
-    if idempotency_key:
-        with get_db() as db:
-            existing = db.execute(
-                select(Event).where(
-                    and_(Event.source == source, Event.idempotency_key == idempotency_key)
-                )
-            ).scalar_one_or_none()
-        if existing is not None:
-            # Rationale: duplicates must not create another row or trigger another relay.
-            return _create_response(existing)
-
     received_at = datetime.now(timezone.utc)
+    queue_pre_full = False
     event = Event(
         id=str(uuid4()),
         source=source,
@@ -187,6 +243,17 @@ async def create_event(source: str, request: Request) -> CreateWebhookResponse:
         request_id=request_id,
         idempotency_key=idempotency_key,
     )
+    if settings.target_url:
+        queue_pre_full = not relay.relay_queue_has_capacity()
+        if queue_pre_full:
+            # Why: avoid a second DB update when the bounded queue is already saturated.
+            event.relay_status = "skipped"
+            event.relay_reason = "relay_queue_full"
+            event.relay_last_error = "relay queue is full"
+        else:
+            # Why: mark relay as queued so callers can observe asynchronous execution.
+            event.relay_status = "scheduled"
+            event.relay_reason = "scheduled"
 
     try:
         with get_db() as db:
@@ -208,35 +275,39 @@ async def create_event(source: str, request: Request) -> CreateWebhookResponse:
     EVENTS_RECEIVED_TOTAL.labels(source=source).inc()
     logger.info("event_received", extra={"source": source, "event_id": event.id})
 
-    if settings.target_url:
-        relay_result = await relay.relay_event(
-            event={
-                "event_id": event.id,
-                "source": source,
-                "received_at": event.received_at.astimezone(timezone.utc).isoformat(),
-                "payload": payload,
-                "headers": safe_headers,
-            },
-            target_url=settings.target_url,
-            request_id=request_id,
-            relay_allow_hosts=settings.relay_allow_hosts,
-        )
-        with get_db() as db:
-            stored = db.get(Event, event.id)
-            if stored is not None:
-                # Rationale: relay result is persisted after intake so webhook
-                # acceptance is not coupled to relay success.
-                stored.relay_status = "success" if relay_result.get("success") else "failed"
-                if not relay_result.get("attempted"):
-                    stored.relay_status = "skipped"
-                stored.relay_attempted = 1 if relay_result.get("attempted") else 0
-                stored.relay_success = 1 if relay_result.get("success") else 0
-                stored.relay_attempts = int(relay_result.get("attempts") or 0)
-                stored.relay_reason = relay_result.get("reason")
-                stored.relay_last_error = relay_result.get("last_error")
-                stored.relay_last_status_code = relay_result.get("status_code")
-                stored.relay_last_attempt_at = relay_result.get("last_attempt_at")
-                event = stored
+    if settings.target_url and not queue_pre_full:
+        relay_payload = {
+            "event_id": event.id,
+            "source": source,
+            "received_at": event.received_at.astimezone(timezone.utc).isoformat(),
+            "payload": payload,
+            "headers": safe_headers,
+        }
+
+        async def relay_job() -> None:
+            await _relay_and_persist(
+                event_id=event.id,
+                relay_payload=relay_payload,
+                target_url=settings.target_url,
+                request_id=request_id,
+                relay_allow_hosts=settings.relay_allow_hosts,
+                relay_allow_private_ips=settings.relay_allow_private_ips,
+            )
+
+        if not relay.enqueue_relay_job(relay_job):
+            queue_full_result = _queue_full_relay_result()
+            _apply_relay_result(event, queue_full_result)
+            with get_db() as db:
+                # Perf: avoid a read-before-write when marking queue saturation.
+                db.execute(
+                    update(Event)
+                    .where(Event.id == event.id)
+                    .values(**_relay_update_values(queue_full_result))
+                )
+            logger.warning(
+                "relay_queue_full",
+                extra={"source": source, "event_id": event.id},
+            )
 
     return _create_response(event)
 

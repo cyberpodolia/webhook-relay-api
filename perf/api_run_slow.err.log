@@ -1,0 +1,7 @@
+INFO:     Started server process [34360]
+INFO:     Waiting for application startup.
+{"ts": "2026-03-08T13:42:40.429356+00:00", "level": "INFO", "logger": "app.main", "message": "app_started", "request_id": "-"}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:18000 (Press CTRL+C to quit)
+{"ts": "2026-03-08T13:42:40.691390+00:00", "level": "INFO", "logger": "app.request", "message": "request", "request_id": "affa7001-4f9d-44ae-b43b-8a5699a7cc2b", "method": "GET", "path": "/metrics", "path_label": "/metrics", "status": 200, "duration_ms": 5.85}
+{"ts": "2026-03-08T13:42:41.410843+00:00", "level": "INFO", "logger": "app.request", "message": "request", "request_id": "fbfeaf0d-c5ce-42c8-827e-7f893cc318c0", "method": "GET", "path": "/health", "path_label": "/health", "status": 200, "duration_ms": 1.13}

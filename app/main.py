@@ -23,7 +23,12 @@ from app.core.errors import error_response, http_exception_handler, validation_e
 from app.core.logging import request_id_ctx, setup_logging
 from app.db.session import init_db
 from app.metrics import REQUEST_COUNT, REQUEST_LATENCY
-from app.services.relay import shutdown_http_client, startup_http_client
+from app.services.relay import (
+    shutdown_http_client,
+    shutdown_relay_dispatcher,
+    startup_http_client,
+    startup_relay_dispatcher,
+)
 
 
 def _label_path(request: Request) -> str:
@@ -43,10 +48,15 @@ async def lifespan(app: FastAPI):
     setup_logging(settings.log_level)
     init_db(settings.database_url)
     await startup_http_client()
+    await startup_relay_dispatcher(
+        worker_count=settings.relay_worker_concurrency,
+        queue_size=settings.relay_queue_size,
+    )
     logging.getLogger("app.main").info("app_started")
     try:
         yield
     finally:
+        await shutdown_relay_dispatcher()
         await shutdown_http_client()
 
 

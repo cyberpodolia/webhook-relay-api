@@ -123,3 +123,43 @@ The production-style perf harness is in `perf/`.
 - Save Grafana screenshots for latency, error rate, relay RPS, CPU, and RAM, then reference them in `perf/REPORT.md`.
 - Record k6 command lines, scenario duration, and relay mode (host-relay or docker-relay) in `perf/REPORT.md`.
 - Keep report entries evidence-based; mark unknowns as `UNKNOWN` when prerequisites are missing.
+
+### Quick Host-Relay Run (Windows, 18000)
+
+```powershell
+# Terminal A (API)
+cd C:\work\repo1-webhook-relay-api
+.\.venv\Scripts\activate
+$env:TARGET_URL="http://127.0.0.1:18101/ingest"
+uvicorn app.main:app --host 0.0.0.0 --port 18000
+```
+
+```powershell
+# Terminal B (perf)
+cd C:\work\repo1-webhook-relay-api\perf
+docker compose -f docker-compose.perf.yml up -d --build
+.\scripts\run-k6.ps1 -Scenario sanity.js -Target "http://host.docker.internal:18000" -InfluxUrl "http://host.docker.internal:8086/k6"
+```
+
+### Latest Measured Results (2026-03-08)
+
+Context:
+
+- Mode: host-relay (API on host, perf stack in Docker)
+- Relay enabled to local perf receivers with explicit dev/perf override:
+  - `RELAY_ALLOW_PRIVATE_IPS=true`
+  - `RELAY_WORKER_CONCURRENCY=2`
+  - `RELAY_QUEUE_SIZE=200`
+
+Measured intake latency for `POST /webhooks/perf` (k6):
+
+| Scenario | p95 | p99 | http_req_failed |
+|---|---:|---:|---:|
+| baseline | 25.72 ms | 60.30 ms | 0.00% |
+| slow_receivers | 43.55 ms | 91.29 ms | 0.00% |
+| flaky_receivers | 92.06 ms | 142.47 ms | 0.00% |
+
+Notes:
+
+- `http_req_failed` reflects the intake endpoint HTTP result. Downstream relay success/failure is recorded separately (DB `relay_attempted`/`relay_success`/`relay_reason` and Prometheus relay metrics).
+- Keep `RELAY_ALLOW_PRIVATE_IPS` disabled by default; it exists to make local perf harness runs possible.
