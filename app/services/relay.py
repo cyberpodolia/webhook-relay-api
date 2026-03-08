@@ -15,7 +15,7 @@ import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -34,6 +34,8 @@ _BLOCKED_IP_FLAGS = (
 )
 
 _client: httpx.AsyncClient | None = None
+_dispatch_queue: asyncio.Queue[Callable[[], Awaitable[None]]] | None = None
+_dispatch_workers: list[asyncio.Task[None]] = []
 
 
 @dataclass
@@ -76,6 +78,64 @@ async def shutdown_http_client() -> None:
         _client = None
 
 
+async def _relay_dispatch_worker(worker_index: int) -> None:
+    """Execute queued relay jobs in a bounded worker pool."""
+    queue = _dispatch_queue
+    if queue is None:
+        return
+    while True:
+        job = await queue.get()
+        try:
+            await job()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("relay_dispatch_job_failed", extra={"worker": worker_index})
+        finally:
+            queue.task_done()
+
+
+async def startup_relay_dispatcher(worker_count: int, queue_size: int) -> None:
+    """Initialize bounded relay dispatch queue and worker tasks."""
+    global _dispatch_queue, _dispatch_workers
+    if _dispatch_queue is not None:
+        return
+    _dispatch_queue = asyncio.Queue(maxsize=max(queue_size, 1))
+    _dispatch_workers = [
+        asyncio.create_task(_relay_dispatch_worker(idx)) for idx in range(max(worker_count, 1))
+    ]
+
+
+async def shutdown_relay_dispatcher() -> None:
+    """Stop relay dispatch workers during app shutdown."""
+    global _dispatch_queue, _dispatch_workers
+    workers = list(_dispatch_workers)
+    _dispatch_workers = []
+    _dispatch_queue = None
+    for worker in workers:
+        worker.cancel()
+    if workers:
+        await asyncio.gather(*workers, return_exceptions=True)
+
+
+def enqueue_relay_job(job: Callable[[], Awaitable[None]]) -> bool:
+    """Schedule relay work without blocking the intake request path."""
+    if _dispatch_queue is None:
+        raise RuntimeError("Relay dispatcher is not initialized")
+    try:
+        _dispatch_queue.put_nowait(job)
+        return True
+    except asyncio.QueueFull:
+        return False
+
+
+def relay_queue_has_capacity() -> bool:
+    """Return True when the dispatcher queue can accept another relay job."""
+    if _dispatch_queue is None:
+        raise RuntimeError("Relay dispatcher is not initialized")
+    return _dispatch_queue.qsize() < _dispatch_queue.maxsize
+
+
 def _get_client() -> httpx.AsyncClient:
     """Return the initialized shared client or fail fast."""
     if _client is None:
@@ -111,7 +171,9 @@ async def _resolve_ips_for_host(host: str) -> set[str]:
 
 
 async def _preflight_target(
-    target_url: str, relay_allow_hosts: set[str] | frozenset[str]
+    target_url: str,
+    relay_allow_hosts: set[str] | frozenset[str],
+    relay_allow_private_ips: bool,
 ) -> RelayOutcome | None:
     """Validate scheme/host/IP policy before sending any outbound request.
 
@@ -132,7 +194,7 @@ async def _preflight_target(
 
     try:
         for ip in await _resolve_ips_for_host(host):
-            if _is_blocked_ip(ip):
+            if not relay_allow_private_ips and _is_blocked_ip(ip):
                 # Security: deny if any resolved record is unsafe (mixed answers).
                 return RelayOutcome(attempted=False, success=False, reason="blocked_ip")
     except socket.gaierror as exc:
@@ -146,6 +208,7 @@ async def relay_event(
     target_url: str,
     request_id: str,
     relay_allow_hosts: set[str] | frozenset[str],
+    relay_allow_private_ips: bool = False,
 ) -> dict[str, Any]:
     """Relay an event with jittered exponential backoff.
 
@@ -156,7 +219,11 @@ async def relay_event(
         Expected network/HTTP failures are returned as structured payloads rather
         than raised, so the webhook intake path can still succeed.
     """
-    preflight_result = await _preflight_target(target_url, relay_allow_hosts)
+    preflight_result = await _preflight_target(
+        target_url,
+        relay_allow_hosts,
+        relay_allow_private_ips,
+    )
     if preflight_result is not None:
         return preflight_result.to_dict()
 

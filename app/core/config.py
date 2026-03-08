@@ -20,6 +20,19 @@ def _csv_set(value: str | None) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse a boolean env var with safe defaults for unset/empty values."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError(f"Invalid boolean value for {name}: {raw}")
+
+
 @dataclass(frozen=True)
 class Settings:
     """Normalized runtime settings consumed across the app."""
@@ -33,6 +46,9 @@ class Settings:
     max_body_bytes: int
     allowed_sources: frozenset[str]
     relay_allow_hosts: frozenset[str]
+    relay_allow_private_ips: bool
+    relay_worker_concurrency: int
+    relay_queue_size: int
     event_retention_days: Optional[int]
     admin_token: str
 
@@ -57,6 +73,9 @@ def get_settings() -> Settings:
     allowed_sources = frozenset(_csv_set(os.getenv("ALLOWED_SOURCES")))
     # Security: normalize hostnames so allowlist matching is case-insensitive.
     relay_allow_hosts = frozenset(host.lower() for host in _csv_set(os.getenv("RELAY_ALLOW_HOSTS")))
+    relay_allow_private_ips = _env_bool("RELAY_ALLOW_PRIVATE_IPS", default=False)
+    relay_worker_concurrency = max(int(os.getenv("RELAY_WORKER_CONCURRENCY", "8")), 1)
+    relay_queue_size = max(int(os.getenv("RELAY_QUEUE_SIZE", "1000")), 1)
     event_retention_days_raw = os.getenv("EVENT_RETENTION_DAYS", "").strip()
     event_retention_days = int(event_retention_days_raw) if event_retention_days_raw else None
     admin_token = os.getenv("ADMIN_TOKEN", "")
@@ -71,6 +90,9 @@ def get_settings() -> Settings:
         max_body_bytes=max_body_bytes,
         allowed_sources=allowed_sources,
         relay_allow_hosts=relay_allow_hosts,
+        relay_allow_private_ips=relay_allow_private_ips,
+        relay_worker_concurrency=relay_worker_concurrency,
+        relay_queue_size=relay_queue_size,
         event_retention_days=event_retention_days,
         admin_token=admin_token,
     )

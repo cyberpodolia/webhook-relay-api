@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -23,8 +23,11 @@ def init_db(database_url: str) -> None:
     global _ENGINE, _SessionLocal
     # Rationale: SQLite commonly runs under tests/local dev where access may cross
     # threads, which requires `check_same_thread=False`.
-    connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
+    is_sqlite = database_url.startswith("sqlite")
+    connect_args = {"check_same_thread": False, "timeout": 5} if is_sqlite else {}
     _ENGINE = create_engine(database_url, connect_args=connect_args)
+    if is_sqlite:
+        _configure_sqlite_pragmas(_ENGINE)
     _SessionLocal = sessionmaker(
         autocommit=False,
         autoflush=False,
@@ -39,6 +42,18 @@ def get_engine() -> Engine:
     if _ENGINE is None:
         raise RuntimeError("Database not initialized")
     return _ENGINE
+
+
+def _configure_sqlite_pragmas(engine: Engine) -> None:
+    """Enable SQLite settings that improve write concurrency under load."""
+
+    @event.listens_for(engine, "connect")
+    def _apply_sqlite_pragmas(dbapi_connection, _connection_record):  # type: ignore[no-untyped-def]
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+        cursor.execute("PRAGMA busy_timeout=5000;")
+        cursor.close()
 
 
 @contextmanager

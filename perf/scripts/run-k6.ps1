@@ -1,9 +1,11 @@
-﻿param(
+param(
     [Parameter(Mandatory = $true)]
     [string]$Scenario,
     [string]$Target = "http://host.docker.internal:8000",
     [string]$InfluxUrl = "http://localhost:8086/k6"
 )
+
+$ErrorActionPreference = "Stop"
 
 $scriptPath = "./k6/scenarios/$Scenario"
 if (-not (Test-Path $scriptPath)) {
@@ -16,3 +18,7 @@ docker run --rm -i `
   -v "${PWD}:/work" `
   -w /work `
   grafana/k6:0.51.0 run -o influxdb=$InfluxUrl $scriptPath
+
+if ($LASTEXITCODE -ne 0) {
+    throw "k6 scenario '$Scenario' failed with exit code $LASTEXITCODE"
+}

@@ -25,6 +25,9 @@ def _reload_app(monkeypatch, tmp_path, **env):
         "MAX_BODY_BYTES": "1048576",
         "ALLOWED_SOURCES": "",
         "RELAY_ALLOW_HOSTS": "",
+        "RELAY_ALLOW_PRIVATE_IPS": "false",
+        "RELAY_WORKER_CONCURRENCY": "2",
+        "RELAY_QUEUE_SIZE": "100",
         "EVENT_RETENTION_DAYS": "",
         "ADMIN_TOKEN": "",
     }
@@ -52,6 +55,17 @@ def make_client(tmp_path, monkeypatch, **env):
 def _sign(secret: str, body: bytes) -> str:
     """Match the production HMAC scheme for request-signature test cases."""
     return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+
+
+def _wait_for_relay_completion(client: TestClient, event_id: str) -> dict:
+    """Poll event state until relay is no longer marked as scheduled."""
+    for _ in range(100):
+        event = client.get(f"/events/{event_id}")
+        assert event.status_code == 200
+        relay = event.json()["relay"]
+        if relay is not None and relay.get("reason") != "scheduled":
+            return relay
+    raise AssertionError("relay outcome did not finalize")
 
 
 def test_health_ok(tmp_path, monkeypatch):
@@ -140,9 +154,34 @@ def test_ssrf_blocking_private_ip_prevents_relay(tmp_path, monkeypatch):
     with make_client(tmp_path, monkeypatch, TARGET_URL="http://127.0.0.1:9999/webhook") as client:
         resp = client.post("/webhooks/source1", json={"a": 1})
         assert resp.status_code == 200
-        relay = resp.json()["relay"]
-        assert relay["attempted"] is False
-        assert relay["reason"] == "blocked_ip"
+        assert resp.json()["relay"]["reason"] == "scheduled"
+        relay_data = _wait_for_relay_completion(client, resp.json()["event_id"])
+        assert relay_data["attempted"] is False
+        assert relay_data["reason"] == "blocked_ip"
+
+
+def test_explicit_private_ip_override_allows_relay_in_perf_mode(tmp_path, monkeypatch):
+    async def fake_post(self, url, json, headers):  # noqa: A002
+        class Resp:
+            status_code = 204
+
+        return Resp()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    with make_client(
+        tmp_path,
+        monkeypatch,
+        TARGET_URL="http://127.0.0.1:18101/ingest",
+        RELAY_ALLOW_PRIVATE_IPS="true",
+    ) as client:
+        resp = client.post("/webhooks/source1", json={"a": 1})
+        assert resp.status_code == 200
+        assert resp.json()["relay"]["reason"] == "scheduled"
+        relay_data = _wait_for_relay_completion(client, resp.json()["event_id"])
+        assert relay_data["attempted"] is True
+        assert relay_data["success"] is True
+        assert relay_data["status_code"] == 204
 
 
 def test_allowlist_host_permits_relay_with_mock_target(tmp_path, monkeypatch):
@@ -170,10 +209,73 @@ def test_allowlist_host_permits_relay_with_mock_target(tmp_path, monkeypatch):
     ) as client:
         resp = client.post("/webhooks/source1", json={"a": 1})
         assert resp.status_code == 200
-        relay_data = resp.json()["relay"]
+        assert resp.json()["relay"]["reason"] == "scheduled"
+        relay_data = _wait_for_relay_completion(client, resp.json()["event_id"])
         assert relay_data["attempted"] is True
         assert relay_data["success"] is True
         assert relay_data["status_code"] == 204
+
+
+def test_relay_is_scheduled_without_waiting_for_completion(tmp_path, monkeypatch):
+    import app.services.relay as relay
+
+    enqueue_called = False
+    relay_called = False
+
+    def fake_enqueue(_job):
+        nonlocal enqueue_called
+        enqueue_called = True
+        return True
+
+    async def fake_relay_event(*args, **kwargs):
+        nonlocal relay_called
+        relay_called = True
+        return {
+            "attempted": True,
+            "success": True,
+            "reason": "success",
+            "status_code": 204,
+            "attempts": 1,
+            "last_error": None,
+            "last_attempt_at": None,
+        }
+
+    monkeypatch.setattr(relay, "enqueue_relay_job", fake_enqueue)
+    monkeypatch.setattr(relay, "relay_event", fake_relay_event)
+
+    with make_client(
+        tmp_path,
+        monkeypatch,
+        TARGET_URL="https://example.com/endpoint",
+        RELAY_ALLOW_HOSTS="example.com",
+    ) as client:
+        resp = client.post("/webhooks/source1", json={"a": 1})
+        assert resp.status_code == 200
+        relay_data = resp.json()["relay"]
+        assert relay_data["reason"] == "scheduled"
+        assert relay_data["attempted"] is False
+        assert relay_data["success"] is False
+        assert enqueue_called is True
+        assert relay_called is False
+
+
+def test_relay_queue_full_marks_event_as_skipped(tmp_path, monkeypatch):
+    import app.services.relay as relay
+
+    monkeypatch.setattr(relay, "enqueue_relay_job", lambda _job: False)
+
+    with make_client(
+        tmp_path,
+        monkeypatch,
+        TARGET_URL="https://example.com/endpoint",
+        RELAY_ALLOW_HOSTS="example.com",
+    ) as client:
+        resp = client.post("/webhooks/source1", json={"a": 1})
+        assert resp.status_code == 200
+        relay_data = resp.json()["relay"]
+        assert relay_data["attempted"] is False
+        assert relay_data["success"] is False
+        assert relay_data["reason"] == "relay_queue_full"
 
 
 def test_pagination_cursor_correctness_and_filtering(tmp_path, monkeypatch):
